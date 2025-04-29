@@ -46,7 +46,7 @@ This script automates the analysis and tuning of ArduPilot rate and attitude con
 ## Usage
 
 ```bash
-python rate_controller_analysis.py <logfile.bin> [options]
+python controller_analysis.py <logfile.bin> [options]
 ```
 
 ### Options
@@ -64,7 +64,7 @@ python rate_controller_analysis.py <logfile.bin> [options]
 
 **Example:**
 ```bash
-python rate_controller_analysis.py logfile.bin -o report.txt
+python controller_analysis.py logfile.bin -o report.txt
 ```
 
 ---
