@@ -1,5 +1,6 @@
 # Ardupilot-Inner-loop-Gain-Estimator
-This script automates the analysis and tuning of ArduPilot rate and attitude controllers (and recommends gyro filter settings) based on flight log data.
+
+This script automates the analysis and tuning of ArduPilot rate and attitude controllers (and recommends gyro filter settings and actuator delay/FF estimation) based on flight log data.
 
 ---
 
@@ -8,53 +9,63 @@ This script automates the analysis and tuning of ArduPilot rate and attitude con
 - **Extract existing parameters** from the log:  
   - Rate controller gains: `ATC_RAT_<axis>_{P,I,D}`  
   - Attitude controller gains: `ATC_ANG_<axis>_P`  
-  - Gyro filter cutoff: `INS_GYRO_FILTER`
+  - Gyro filter cutoff: `INS_GYRO_FILTER`  
+  - Rate feed‑forward gains: `ATC_RAT_<axis>_FF`
 
 - **Rate loop analysis**  
-  - Compute error: `error = setpoint_rate - actual_rate` in deg/s  
-  - Trim first/last data to avoid transients  
+  - Compute error: `error = setpoint_rate - actual_rate` (deg/s)  
+  - Trim first/last seconds to avoid transients  
   - Calculate mean, RMS, and peak errors  
   - Recommend new PID gains by scaling old gains to hit a target RMS error (default 5 deg/s), capped at +20 %
 
 - **Attitude loop analysis**  
-  - Compute error: `error = setpoint_angle - actual_angle` in deg  
+  - Compute error: `error = setpoint_angle - actual_angle` (deg)  
   - Trim data similarly  
   - Calculate mean, RMS, and peak errors  
   - Recommend new P gains to meet a target max attitude error (default 2 deg), capped at +20 %
 
 - **Gyro filter recommendation** (optional)  
   - Parse raw IMU gyro data (X/Y/Z)  
-  - Compute FFT and power spectrum in a noise band (10–200 Hz)  
-  - Suggest a filter cutoff at ~1.2 × dominant noise frequency
+  - Compute FFT and power spectrum in 10–200 Hz  
+  - Suggest cutoff at ~1.2 × dominant noise frequency
+
+- **Actuator delay estimation** (optional)  
+  - Cross‑correlate setpoint and actual response to estimate delay  
+  - Time‐shift data and report median delay
+
+- **Feed‑forward estimation**  
+  - Perform least‐squares fit of controller output vs. setpoint  
+  - Suggest updated `ATC_RAT_<axis>_FF`
 
 - **Reporting & plots**  
   - Console report of old vs. recommended settings  
-  - Optional output to text file (`-o` flag)  
-  - Plots of error vs. time using matplotlib
+  - Optional output to text file (`-o`)  
+  - Progress bars during parsing (requires `tqdm`)  
+  - Matplotlib plots of error vs. time
 
 ---
 
 ## Installation
 
-1. Install dependencies:
-   ```bash
-   pip install pymavlink pandas matplotlib numpy
-   ```
+```bash
+pip install pymavlink pandas numpy matplotlib tqdm
+```
 
 ---
 
 ## Usage
 
 ```bash
-python controller_analysis.py <logfile.bin> [options]
+python rate_controller_analysis.py <logfile.bin> [options]
 ```
 
 ### Options
 
 | Flag                  | Description                                       | Default    |
 |-----------------------|---------------------------------------------------|------------|
-| `-v`, `--verbose`     | Enable detailed logging                           | on         |
+| `-v`, `--verbose`     | Enable detailed logging                           | off        |
 | `-f`, `--filter`      | Recommend gyro filter cutoff                      | on         |
+| `-d`, `--delay`       | Estimate & apply actuator delay                   | on         |
 | `-o FILE`, `--output` | Write report to FILE                              | (stdout)   |
 | `--rate-rms X`        | Target rate RMS error (deg/s)                     | 5.0        |
 | `--att-err X`         | Target attitude max error (deg)                   | 2.0        |
@@ -63,8 +74,9 @@ python controller_analysis.py <logfile.bin> [options]
 | `--trim-end X`        | Seconds to trim at end                            | 5.0        |
 
 **Example:**
+
 ```bash
-python controller_analysis.py logfile.bin -o report.txt
+python rate_controller_analysis.py 20250315_N910FH_F3_AltHold.bin -o report.txt
 ```
 
 ---
@@ -73,62 +85,68 @@ python controller_analysis.py logfile.bin -o report.txt
 
 ### Error Computation
 
-For each axis (roll, pitch, yaw) the script computes:  
+For each axis:
 
 ```text
-rate_error(t)    = rate_setpoint(t)    - rate_actual(t)    # in deg/s
-attitude_error(t) = angle_setpoint(t)   - angle_actual(t)   # in deg
+rate_error(t)     = rate_setpoint(t)   - rate_actual(t)    # deg/s
+attitude_error(t) = angle_setpoint(t)  - angle_actual(t)   # deg
 ```
 
-Data is trimmed by removing the first and last _X_ seconds (configurable) to avoid takeoff/landing effects.
+Data is trimmed by removing the first and last _X_ seconds to avoid takeoff/landing transients.
 
 ### Summary Statistics
 
-Over the trimmed time series of _N_ samples:
+Over _N_ samples:
 
-- **Mean error**:  
-  `mean_error = (1/N) * sum_i(e_i)`
+- Mean error:  
+  `mean = (1/N) * Σ e_i`
 
-- **RMS error**:  
-  `rms_error = sqrt((1/N) * sum_i(e_i^2))`
+- RMS error:  
+  `rms = sqrt((1/N) * Σ e_i^2)`
 
-- **Peak error**:  
-  `peak_error = max_i |e_i|`
+- Peak error:  
+  `peak = max |e_i|`
 
 ### Gain Recommendation
 
-New gains are computed by scaling the old gains proportionally to the measured error vs. target, then capping the increase:
-
 ```text
 P_new = min(
-    P_old * (measured_error / target_error),
-    P_old * max_bump_factor
+  P_old * (measured_error / target_error),
+  P_old * max_bump_factor
 )
-```
-
-- **Rate loop** uses measured RMS vs. target RMS  
-- **Attitude loop** uses measured peak error vs. target max  
-
-The script also sets inner-loop I and D gains by fixed ratios of the new P:
-```text
 I_new = P_new * 0.1
 D_new = P_new * 0.01
 ```
 
+- **Rate loop** uses measured RMS vs. `--rate-rms`  
+- **Attitude loop** uses measured peak vs. `--att-err`
+
 ### Filter Recommendation
 
-To suggest a gyro filter cutoff:  
-1. Compute the sampling rate `fs` from IMU timestamps.  
-2. Perform an FFT of the zero-mean gyro signal to get frequencies and power.  
-3. Identify the dominant noise frequency `f_peak` within 10–200 Hz.  
-4. Recommend:  
-   ```text
-   cutoff = 1.2 * f_peak
-   ```
+```text
+cutoff = 1.2 * f_peak
+```
+Where `f_peak` is the dominant noise frequency (10–200 Hz) from the FFT of zero‑mean gyro data.
+
+### Delay Estimation
+
+```python
+# assume fs = sampling rate
+tau = estimate_delay(setpoint, response, fs)
+```
+Use cross‑correlation to find the lag of maximum correlation.
+
+### Feed‑Forward Estimation
+
+Fit controller output vs. setpoint via least‑squares:
+```text
+FF_est = (Σ y_i x_i) / (Σ x_i^2)
+```
+where `y_i` is controller output (ROut/POut/YOut) and `x_i` is setpoint.
 
 ---
 
 ## License
 
-MIT © Pitchlink, LLC 
+MIT © Pitchlink, LLC
 
