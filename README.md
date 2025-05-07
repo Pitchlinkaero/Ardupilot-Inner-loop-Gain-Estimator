@@ -76,7 +76,7 @@ python rate_controller_analysis.py <logfile.bin> [options]
 **Example:**
 
 ```bash
-python rate_controller_analysis.py 20250315_N910FH_F3_AltHold.bin -o report.txt
+python rate_controller_analysis.py logfile.bin -o report.txt
 ```
 
 ---
